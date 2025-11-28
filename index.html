@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>苏州 - 长三角时空交通拓扑</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Noto Sans SC', sans-serif;
+            background-color: #f0f9ff;
+            overflow: hidden;
+            cursor: grab; /* Cursor indicates draggable */
+        }
+        body.grabbing {
+            cursor: grabbing;
+        }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        
+        /* Custom UI Panels */
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        /* City Node Pulse Animation */
+        @keyframes pulse-ring {
+            0% { transform: scale(0.8); opacity: 0.5; }
+            100% { transform: scale(2.2); opacity: 0; }
+        }
+        .city-pulse::before {
+            content: '';
+            position: absolute;
+            left: -50%; top: -50%; width: 200%; height: 200%;
+            border-radius: 50%;
+            border: 2px solid #22d3ee;
+            animation: pulse-ring 2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+        }
+    </style>
+</head>
+<body class="relative h-screen w-full flex items-center justify-center">
+
+    <!-- Canvas Layer -->
+    <canvas id="transportCanvas" class="absolute inset-0 z-0"></canvas>
+
+    <!-- UI: Header -->
+    <div class="absolute top-6 left-6 z-10 pointer-events-none">
+        <div class="glass-panel px-6 py-4 rounded-xl border-l-4 border-cyan-500 pointer-events-auto">
+            <h1 class="text-2xl font-bold text-slate-800 flex items-center gap-2">
+                <i class="fas fa-map-marked-alt text-cyan-600"></i>
+                苏州枢纽时空图
+            </h1>
+            <p class="text-sm text-slate-500 mt-1 mono">Time-Space Topology: Suzhou Stn Center</p>
+            <div class="mt-2 flex items-center gap-2 text-xs text-slate-400">
+                <span class="w-2 h-2 rounded-full bg-blue-500 ml-1"></span> 高铁
+                <span class="w-2 h-2 rounded-full bg-orange-500 ml-2"></span> 驾车
+                <span class="w-2 h-2 rounded-full bg-indigo-500 ml-2"></span> 飞机
+            </div>
+        </div>
+    </div>
+
+    <!-- NEW: Button to District Map (Modified: removed target="_blank") -->
+    <div class="absolute top-6 right-6 z-10">
+        <a href="suzhou_districts_map.html" class="glass-panel px-4 py-3 rounded-xl border border-slate-200 text-slate-700 hover:text-cyan-600 hover:border-cyan-400 transition flex items-center gap-2 group shadow-sm hover:shadow-md cursor-pointer no-underline">
+            <div class="text-right">
+                <div class="text-sm font-bold">查看苏州市行政区划</div>
+                <div class="text-[10px] text-slate-400 group-hover:text-cyan-500">View District Map</div>
+            </div>
+            <div class="w-8 h-8 rounded-full bg-slate-100 group-hover:bg-cyan-50 flex items-center justify-center transition">
+                <i class="fas fa-arrow-right text-slate-400 group-hover:text-cyan-500"></i>
+            </div>
+        </a>
+    </div>
+
+    <!-- UI: Controls (Left) -->
+    <div class="absolute left-6 top-1/3 z-10 w-80 space-y-4 pointer-events-none" id="control-panel" style="display: none;">
+        <div class="glass-panel p-5 rounded-xl transition-all duration-300 pointer-events-auto">
+            <h2 class="text-lg font-bold text-slate-800 mb-1 flex justify-between items-center">
+                <span id="target-city-name">--</span>
+                <span class="text-xs bg-slate-200 text-slate-600 px-2 py-1 rounded">目的地</span>
+            </h2>
+            <p class="text-xs text-slate-500 mb-4" id="target-desc">选择一个城市查看方案</p>
+
+            <div class="space-y-3 max-h-[50vh] overflow-y-auto" id="transport-options">
+                <!-- Options injected by JS -->
+            </div>
+        </div>
+        
+        <!-- Comparison Result -->
+        <div class="glass-panel p-4 rounded-xl border-l-4 border-slate-800 pointer-events-auto" id="result-panel" style="opacity: 0;">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-xl">
+                    🐈‍⬛
+                </div>
+                <div>
+                    <div class="text-xs text-slate-500 uppercase font-bold">Estimated Cost</div>
+                    <div class="text-xl font-bold text-slate-800 mono" id="time-display">0 min</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- UI: Floating Hint -->
+    <div id="start-hint" class="absolute bottom-10 text-center w-full pointer-events-none z-10 text-slate-400 text-sm">
+        <span class="bg-white/80 backdrop-blur px-3 py-1 rounded-full shadow-sm animate-pulse">
+            <i class="fas fa-hand-pointer mr-1"></i> 拖动地图查看更多城市，点击选择目的地
+        </span>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('transportCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        // --- Data Structure ---
+        const suzhou = { x: 0, y: 0, name: "苏州站 (Suzhou Stn)", id: "sz", type: "hub" };
+        
+        const cities = [
+            // 长三角核心区
+            { 
+                id: "wx", name: "无锡 (Wuxi)", x: -120, y: -60, 
+                desc: "太湖明珠，相邻而居",
+                routes: [
+                    { type: "hsr", label: "高铁/动车", time: 15, cost: 15, color: "#3b82f6" }, 
+                    { type: "car", label: "自驾 (G42)", time: 45, cost: 40, color: "#f97316" },
+                    { type: "metro", label: "地铁 S1线", time: 70, cost: 8, color: "#10b981" } 
+                ]
+            },
+            { 
+                id: "sh_hq", name: "上海虹桥 (Hongqiao)", x: 120, y: 20, 
+                desc: "长三角第一枢纽",
+                routes: [
+                    { type: "hsr", label: "高铁 (最快)", time: 23, cost: 35, color: "#3b82f6" }, 
+                    { type: "car", label: "自驾 (G2/G42)", time: 75, cost: 90, color: "#f97316" },
+                    { type: "metro", label: "跨城地铁", time: 140, cost: 15, color: "#10b981" }
+                ]
+            },
+            { 
+                id: "sh_stn", name: "上海站 (Shanghai Stn)", x: 160, y: -30, 
+                desc: "市中心核心枢纽",
+                routes: [
+                    { type: "hsr", label: "高铁/城际", time: 35, cost: 30, color: "#3b82f6" }
+                ]
+            },
+            { 
+                id: "nj", name: "南京 (Nanjing)", x: -240, y: -100, 
+                desc: "六朝古都，省会方向",
+                routes: [
+                    { type: "hsr", label: "高铁 G字头", time: 60, cost: 100, color: "#3b82f6" },
+                    { type: "car", label: "自驾 (长途)", time: 160, cost: 210, color: "#f97316" }
+                ]
+            },
+            { 
+                id: "hz", name: "杭州 (Hangzhou)", x: -60, y: 180, 
+                desc: "人间天堂，亚运之城",
+                routes: [
+                    { type: "hsr", label: "高铁", time: 90, cost: 110, color: "#3b82f6" },
+                    { type: "car", label: "自驾", time: 110, cost: 170, color: "#f97316" }
+                ]
+            },
+            { 
+                id: "jx", name: "嘉兴 (Jiaxing)", x: 60, y: 120, 
+                desc: "党的诞生地",
+                routes: [
+                    { type: "hsr", label: "高铁", time: 55, cost: 40, color: "#3b82f6" },
+                    { type: "car", label: "自驾", time: 70, cost: 70, color: "#f97316" }
+                ]
+            },
+            { 
+                id: "ks", name: "昆山 (Kunshan)", x: 60, y: -20, 
+                desc: "全国最强县级市",
+                routes: [
+                    { type: "hsr", label: "高铁", time: 10, cost: 12, color: "#3b82f6" },
+                    { type: "metro", label: "地铁 11号线", time: 40, cost: 7, color: "#10b981" },
+                    { type: "car", label: "自驾", time: 35, cost: 30, color: "#f97316" }
+                ]
+            },
+            // 新增远程目的地
+            {
+                id: "bj", name: "北京 (Beijing)", x: -50, y: -400,
+                desc: "首都，京沪线终点",
+                routes: [
+                    { type: "hsr", label: "高铁 G字头", time: 240, cost: 550, color: "#3b82f6" }, // ~4h
+                    { type: "flight", label: "飞机 (经硕放)", time: 270, cost: 800, color: "#6366f1" } // 1h ground + 1.5h wait + 2h flight
+                ]
+            },
+            {
+                id: "wh", name: "武汉 (Wuhan)", x: -400, y: -50,
+                desc: "九省通衢",
+                routes: [
+                    { type: "hsr", label: "高铁/动车", time: 210, cost: 380, color: "#3b82f6" }, // ~3.5h
+                    { type: "flight", label: "飞机 (经浦东)", time: 300, cost: 700, color: "#6366f1" } 
+                ]
+            },
+            {
+                id: "cd", name: "成都 (Chengdu)", x: -500, y: 50,
+                desc: "天府之国",
+                routes: [
+                    { type: "flight", label: "飞机 (经硕放)", time: 330, cost: 1100, color: "#6366f1" }, // ~3h flight + ground
+                    { type: "hsr", label: "高铁 (长途)", time: 660, cost: 950, color: "#3b82f6" } // ~11h
+                ]
+            },
+            {
+                id: "sz_gd", name: "深圳 (Shenzhen)", x: -50, y: 450,
+                desc: "大湾区核心",
+                routes: [
+                    { type: "flight", label: "飞机 (经硕放)", time: 300, cost: 1000, color: "#6366f1" },
+                    { type: "hsr", label: "高铁 (动卧)", time: 600, cost: 850, color: "#3b82f6" } // ~10h
+                ]
+            }
+        ];
+
+        // --- View & Interaction State ---
+        let centerX, centerY;
+        let selectedCity = null;
+        let animationId;
+        let traveler = { active: false, x: 0, y: 0, progress: 0, speed: 0, color: '#000' };
+        
+        // Panning State
+        let panX = 0;
+        let panY = 0;
+        let isDragging = false;
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+
+        // Assets
+        const catImage = new Image();
+        catImage.src = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIj48cGF0aCBkPSJNMzIgMTEyYy0xMi42IDAtMjMuNiA2LjgtMjkuNiAxNy42QzAgMTM0LjggMy4yIDE0MC40IDcuNiAxNDQuNmM0LjYgNC4yIDEyLjQgNy40IDE5LjYgNy40bDE4IDBjMTIuNiAwIDI0IDQuNiAzMiAxMi42bDQyLjIgNDIuMmMxMi42IDEyLjYgMzMuNCAxMi42IDQ1LjIgMGwxOS0xOWMzMi0zMiA4NS42LTMxLjggMTE3LjIgMGwxOSAxOWMxMi42IDEyLjYgMzMuNCAxMi42IDQ1LjIgMGw0Mi4yLTQyLjJjOC04IDE5LjQtMTIuNiAzMi0xMi42bDE4IDBjNy4yIDAgMTUuMi0zLjIgMTkuNi03LjRjNC40LTQuMiA3LjYtOS44IDUuMi0xNS4yYy02LTEwLjgtMTctMTcuNi0yOS42LTE3LjZsLTE0LjYgMGMtNDEuNCAwLTc5LjYgMjQuNi05Ny42IDYyLjZMNDQ4IDMzNy40YzE3LjYgMTcuNiAxNy42IDQ2LjIgMCA2My44cy00Ni4yIDE3LjYtNjMuOCAwTDMzNi42IDM1NGMtMTAgMTAtMTAgMjYuMiAwIDM2LjJjMTAgMTAgMjYuMiAxMCAzNi4yIDBsMjIuNi0yMi42YzguMi04LjIgMjEuNC04LjIgMjkuNiAwczguMiAyMS40IDAgMjkuNmwtMjIuNiAyMi42Yy0zMiAzMi04My44IDMyLTExNS44IDBzLTMyLTgzLjggMC0xMTUuOGw0Ny42LTQ3LjZMMjU2IDIwMmw3OC4yIDc4LjJjMTcuNiAxNy42IDE3LjYgNDYuMiAwIDYzLjhzLTQ2LjIgMTcuNiA2My44IDBMMjI3LjQgMjkxLjRjLTEwLTEwLTI2LjItMTAtMzYuMiAwcy0xMCAyNi4yIDAgMzYuMmwxNy42IDE3LjZjMzIgMzIgMzIgODMuOCAwIDExNS44cy04My44IDMyLTExNS44IDBsLTE3LjYtMTcuNmMtOC4yLTguMi04LjItMjEuNCAwLTI5LjZzMjEuNC04LjIgMjkuNiAwbDE3LjYgMTcuNmMxMCAxMCAyNi4yIDEwIDM2LjIgMHMxMC0yNi4yIDAtMzYuMkwxMDYuMiAzNDRjLTE3LjYtMTcuNi0xNy42LTQ2LjIgMC02My44czQ2LjItMTcuNiA2My44IDBsNDcuNiA0Ny42TDQ5LjQgMTA5LjRjLTE4LTM4LTItODMgNDEuNC04M0w5MC44IDI2LjRjMTcuNi0xNy42IDQ2LjItMTcuNiA2My44IDBzMTcuNi 42LjIgMCA2My44TDExMiA1MmMwIDEyLjYtNC42IDI0LTEyLjYgMzJsLTI4IDI4Yy0xOCAzOC0yIDgzIDQxLjQgODNMMzIgMTEyeiIgZmlsbD0iIzMzNDE1NSIvPjwvc3ZnPg==';
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            centerX = canvas.width / 2;
+            centerY = canvas.height / 2;
+            draw();
+        }
+        window.addEventListener('resize', resize);
+
+        // --- Interaction Handlers ---
+        canvas.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+            document.body.classList.add('grabbing');
+        });
+
+        window.addEventListener('mouseup', () => {
+            isDragging = false;
+            document.body.classList.remove('grabbing');
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (isDragging) {
+                const dx = e.clientX - lastMouseX;
+                const dy = e.clientY - lastMouseY;
+                panX += dx;
+                panY += dy;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                // Don't fully redraw, animation loop handles it
+            }
+        });
+
+        canvas.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const clickY = e.clientY - rect.top;
+            
+            cities.forEach(city => {
+                const screenX = centerX + panX + city.x;
+                const screenY = centerY + panY + city.y;
+                
+                const dist = Math.sqrt((clickX - screenX)**2 + (clickY - screenY)**2);
+                if (dist < 20) {
+                    selectCity(city);
+                }
+            });
+        });
+
+        // --- Rendering ---
+        function drawNode(x, y, label, isCenter = false, isSelected = false) {
+            ctx.beginPath();
+            if (isCenter || isSelected) {
+                ctx.arc(x, y, isCenter ? 30 : 20, 0, Math.PI * 2);
+                ctx.fillStyle = isCenter ? 'rgba(34, 211, 238, 0.2)' : 'rgba(251, 146, 60, 0.2)';
+                ctx.fill();
+            }
+            ctx.beginPath();
+            ctx.arc(x, y, isCenter ? 12 : 8, 0, Math.PI * 2);
+            ctx.fillStyle = isCenter ? '#0891b2' : (isSelected ? '#f97316' : '#64748b');
+            ctx.fill();
+            
+            ctx.font = isCenter ? 'bold 16px Noto Sans SC' : '14px Noto Sans SC';
+            ctx.fillStyle = '#334155';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, x, y + (isCenter ? 45 : 30));
+        }
+
+        function drawLine(x1, y1, x2, y2, isActive = false, color = '#cbd5e1') {
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            if (!isActive) {
+                ctx.setLineDash([5, 5]);
+                ctx.strokeStyle = '#cbd5e1';
+                ctx.lineWidth = 1;
+            } else {
+                ctx.setLineDash([]);
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 3;
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = color;
+            }
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+            ctx.setLineDash([]);
+        }
+
+        function drawTraveler() {
+            if (!traveler.active) return;
+            
+            // Start and End are relative to Center (0,0)
+            const startX = 0; // Suzhou relative
+            const startY = 0;
+            const endX = selectedCity.x;
+            const endY = selectedCity.y;
+            
+            // Interpolate Local Position
+            const localX = startX + (endX - startX) * traveler.progress;
+            const localY = startY + (endY - startY) * traveler.progress;
+            
+            // Draw at Screen Position
+            // Screen = Center + Pan + Local
+            const screenX = centerX + panX + localX;
+            const screenY = centerY + panY + localY;
+            
+            const size = 30;
+            ctx.drawImage(catImage, screenX - size/2, screenY - size/2, size, size);
+            
+            const currentTime = Math.floor(traveler.progress * traveler.totalTime);
+            ctx.font = 'bold 12px JetBrains Mono';
+            ctx.fillStyle = '#1e293b';
+            ctx.fillText(currentTime + "m", screenX, screenY - 25);
+            
+            traveler.progress += traveler.speed;
+            if (traveler.progress >= 1) {
+                traveler.progress = 1;
+                traveler.active = false;
+                ctx.beginPath();
+                ctx.arc(screenX, screenY, 20, 0, Math.PI * 2);
+                ctx.strokeStyle = traveler.color;
+                ctx.stroke();
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.strokeStyle = '#e2e8f0';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            // Draw grid covering screen
+            for (let i = 0; i < canvas.width; i+=50) { ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); }
+            for (let i = 0; i < canvas.height; i+=50) { ctx.moveTo(0, i); ctx.lineTo(canvas.width, i); }
+            ctx.stroke();
+
+            // Apply Global Transform for World Elements
+            ctx.save();
+            ctx.translate(centerX + panX, centerY + panY);
+
+            // Draw Lines (from 0,0 to city.x, city.y)
+            cities.forEach(city => {
+                const isTarget = selectedCity && selectedCity.id === city.id;
+                drawLine(0, 0, city.x, city.y, isTarget, traveler.color);
+            });
+
+            // Draw Suzhou (at 0,0)
+            drawNode(0, 0, suzhou.name, true);
+
+            // Draw Other Cities
+            cities.forEach(city => {
+                drawNode(city.x, city.y, city.name, false, selectedCity && selectedCity.id === city.id);
+            });
+            
+            ctx.restore(); 
+            
+            drawTraveler();
+
+            animationId = requestAnimationFrame(draw);
+        }
+
+        // --- Logic ---
+        function selectCity(city) {
+            selectedCity = city;
+            traveler.active = false; 
+            traveler.progress = 0;
+            
+            document.getElementById('control-panel').style.display = 'block';
+            document.getElementById('start-hint').style.display = 'none';
+            document.getElementById('target-city-name').innerText = city.name.split(' ')[0];
+            document.getElementById('target-desc').innerText = city.desc;
+            document.getElementById('result-panel').style.opacity = 0;
+            
+            const optionsDiv = document.getElementById('transport-options');
+            optionsDiv.innerHTML = '';
+            
+            city.routes.forEach(route => {
+                const btn = document.createElement('div');
+                btn.className = "cursor-pointer p-3 rounded-lg border border-slate-200 hover:border-cyan-400 hover:bg-cyan-50 transition flex justify-between items-center group";
+                btn.innerHTML = `
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0" style="background-color: ${route.color}">
+                            <i class="fas ${getIcon(route.type)}"></i>
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <div class="text-sm font-bold text-slate-700 truncate">${route.label}</div>
+                            <div class="text-xs text-slate-400">¥${route.cost}</div>
+                        </div>
+                    </div>
+                    <div class="text-lg font-bold text-slate-300 group-hover:text-cyan-600 transition mono shrink-0">${formatTime(route.time)}</div>
+                `;
+                btn.onclick = () => startJourney(route);
+                optionsDiv.appendChild(btn);
+            });
+        }
+        
+        function formatTime(mins) {
+            if(mins >= 60) {
+                const h = Math.floor(mins/60);
+                const m = mins%60;
+                return m > 0 ? `${h}h${m}m` : `${h}h`;
+            }
+            return `${mins}m`;
+        }
+
+        function getIcon(type) {
+            if (type === 'hsr') return 'fa-train';
+            if (type === 'car') return 'fa-car-side';
+            if (type === 'metro') return 'fa-subway';
+            if (type === 'flight') return 'fa-plane';
+            return 'fa-location-arrow';
+        }
+
+        function startJourney(route) {
+            traveler.active = true;
+            traveler.progress = 0;
+            traveler.totalTime = route.time;
+            traveler.color = route.color;
+            
+            // Adjust animation speed based on distance/time
+            const visualDuration = Math.min(3.0, Math.max(0.8, route.time / 60));
+            traveler.speed = 1 / (visualDuration * 60);
+            
+            const resPanel = document.getElementById('result-panel');
+            resPanel.style.opacity = 1;
+            document.getElementById('time-display').innerText = `${formatTime(route.time)} / ¥${route.cost}`;
+            document.getElementById('time-display').style.color = route.color;
+        }
+
+        resize();
+
+    </script>
+</body>
+</html>
