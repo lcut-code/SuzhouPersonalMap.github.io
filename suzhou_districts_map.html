@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>苏州市行政区划详情</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700&display=swap" rel="stylesheet">
+
+    <style>
+        body { font-family: 'Noto Sans SC', sans-serif; }
+        #map { height: 100vh; width: 100%; z-index: 0; background: #ffffff; }
+        
+        /* District Labels */
+        .district-label {
+            background: rgba(255, 255, 255, 0.8);
+            border: 1px solid #94a3b8;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 12px;
+            color: #334155;
+            font-weight: bold;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            white-space: nowrap;
+        }
+
+        /* Custom Scrollbar */
+        .custom-scroll::-webkit-scrollbar { width: 4px; }
+        .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
+        
+        /* Loading Spinner */
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="flex h-screen overflow-hidden bg-slate-50">
+
+    <!-- Sidebar -->
+    <div class="w-64 bg-white shadow-xl z-10 flex flex-col border-r border-slate-200 shrink-0">
+        <div class="p-5 border-b border-slate-100">
+            <h1 class="text-xl font-bold text-slate-800 flex items-center gap-2">
+                <i class="fas fa-map text-cyan-600"></i> 苏州全图
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">Suzhou Administrative Map</p>
+            <div class="mt-4">
+                <button onclick="resetMap()" class="w-full py-2 px-4 bg-slate-100 hover:bg-cyan-50 text-slate-600 hover:text-cyan-700 rounded-lg text-sm font-bold transition flex items-center justify-center gap-2 border border-slate-200 hover:border-cyan-200">
+                    <i class="fas fa-globe"></i> 显示全城
+                </button>
+            </div>
+        </div>
+        
+        <div class="flex-1 overflow-y-auto custom-scroll p-3 space-y-2" id="district-list">
+            <!-- District buttons will be injected here -->
+            <div class="text-center py-10 text-slate-400 text-sm">
+                <div class="loader mx-auto mb-3"></div>
+                正在加载区划数据...
+            </div>
+        </div>
+
+        <div class="p-4 border-t border-slate-100 text-[10px] text-slate-400 text-center">
+            Data Source: AliYun DataV GeoJSON
+        </div>
+    </div>
+
+    <!-- Map Container -->
+    <div class="flex-1 relative">
+        <div id="map"></div>
+        
+        <!-- Return Button: Moved to the LEFT of the zoom controls (right-16 approx 64px) -->
+        <a href="yrd_transport_viz.html" class="absolute top-3 right-14 z-[1000] bg-white hover:bg-slate-50 text-slate-600 hover:text-cyan-600 px-4 py-2 rounded shadow-md border border-slate-200 font-bold text-sm flex items-center gap-2 transition no-underline">
+            <i class="fas fa-arrow-left"></i> 返回时空图
+        </a>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <script>
+        // Initialize Map
+        const map = L.map('map', {
+            zoomControl: false, // We will add it manually to control position if needed, or leave default
+            attributionControl: false
+        }).setView([31.30, 120.62], 9);
+
+        // Add Zoom Control (Default is topright, our button is shifted left to avoid it)
+        L.control.zoom({ position: 'topright' }).addTo(map);
+
+        // 1. ADD BASE TILE LAYER (The Map Details)
+        // Using OpenStreetMap Standard for maximum detail (roads, buildings)
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            opacity: 1.0 
+        }).addTo(map);
+
+        // State
+        let geoJsonLayer = null;
+        let maskLayer = null; // The white cover
+        let allFeatures = []; // Store raw features for masking logic
+        const districtDataUrl = 'https://geo.datav.aliyun.com/areas_v3/bound/320500_full.json'; 
+        
+        // Styles
+        const styleDefault = {
+            color: "#3b82f6",     
+            weight: 2,
+            opacity: 0.6,
+            fillColor: "#3b82f6", 
+            fillOpacity: 0.0      // Transparent fill to see the map!
+        };
+
+        const styleHidden = {
+            color: "transparent",
+            weight: 0,
+            fillOpacity: 0
+        };
+
+        // Fetch Data
+        fetch(districtDataUrl)
+            .then(response => response.json())
+            .then(data => {
+                allFeatures = data.features;
+                initGeoJson(data);
+                initMask(allFeatures); // Create mask for "Whole City"
+                initSidebar(data);
+            })
+            .catch(err => {
+                console.error("Failed to load map data", err);
+                document.getElementById('district-list').innerHTML = `
+                    <div class="text-red-500 text-center p-4 text-sm">
+                        数据加载失败<br>请检查网络连接
+                    </div>`;
+            });
+
+        function initGeoJson(data) {
+            geoJsonLayer = L.geoJSON(data, {
+                style: styleDefault,
+                onEachFeature: (feature, layer) => {
+                    layer.bindTooltip(feature.properties.name, {
+                        permanent: false,
+                        direction: 'center',
+                        className: 'district-label'
+                    });
+
+                    layer.on('click', () => {
+                        selectDistrict(layer);
+                    });
+                }
+            }).addTo(map);
+
+            map.fitBounds(geoJsonLayer.getBounds());
+        }
+
+        /**
+         * Create a "Mask" layer that covers everything EXCEPT the target shapes.
+         * This creates the "Spotlight" effect.
+         */
+        function initMask(features) {
+            updateMaskLayer(features);
+        }
+
+        function updateMaskLayer(activeFeatures) {
+            if (maskLayer) {
+                map.removeLayer(maskLayer);
+            }
+
+            // 1. Create a huge polygon covering the world
+            const worldCoords = [
+                [90, -180],
+                [90, 180],
+                [-90, 180],
+                [-90, -180]
+            ];
+
+            // 2. Extract holes from features
+            // Leaflet Polygon structure: [ [OuterRing], [Hole1], [Hole2]... ]
+            const holes = [];
+
+            activeFeatures.forEach(feature => {
+                const geom = feature.geometry;
+                if (geom.type === 'Polygon') {
+                    // GeoJSON is LngLat, Leaflet needs LatLng. L.GeoJSON handles this usually,
+                    // but for manual construction we must flip.
+                    holes.push(flipCoords(geom.coordinates[0]));
+                } else if (geom.type === 'MultiPolygon') {
+                    geom.coordinates.forEach(poly => {
+                        holes.push(flipCoords(poly[0]));
+                    });
+                }
+            });
+
+            // 3. Construct the Mask Polygon
+            const maskPolyCoords = [worldCoords, ...holes];
+
+            maskLayer = L.polygon(maskPolyCoords, {
+                color: 'transparent', // No border for the mask itself
+                fillColor: '#ffffff', // White mask
+                fillOpacity: 1,       // Fully opaque to hide outside map
+                interactive: false    // Let clicks pass through (though it covers outside)
+            }).addTo(map);
+            
+            // Ensure mask is above tiles but below the district borders
+            maskLayer.bringToBack(); 
+        }
+
+        function flipCoords(ring) {
+            return ring.map(coord => [coord[1], coord[0]]); // [Lng, Lat] -> [Lat, Lng]
+        }
+
+        function initSidebar(data) {
+            const listEl = document.getElementById('district-list');
+            listEl.innerHTML = ''; 
+
+            const features = data.features.sort((a, b) => a.properties.adcode - b.properties.adcode);
+
+            features.forEach(feature => {
+                const name = feature.properties.name;
+                const btn = document.createElement('div');
+                btn.className = "district-item cursor-pointer p-3 rounded-lg border border-transparent hover:bg-slate-50 hover:border-slate-200 transition flex items-center justify-between group";
+                btn.setAttribute('data-name', name);
+                btn.innerHTML = `
+                    <span class="text-sm font-medium text-slate-600 group-hover:text-slate-900">${name}</span>
+                    <i class="fas fa-eye text-[10px] text-slate-300 group-hover:text-cyan-400 opacity-0 group-hover:opacity-100 transition"></i>
+                `;
+                
+                btn.onclick = () => {
+                    geoJsonLayer.eachLayer(layer => {
+                        if (layer.feature.properties.name === name) {
+                            selectDistrict(layer);
+                        }
+                    });
+                };
+                listEl.appendChild(btn);
+            });
+        }
+
+        function selectDistrict(layer) {
+            const name = layer.feature.properties.name;
+
+            // 1. Update Mask to ONLY show this district
+            updateMaskLayer([layer.feature]);
+
+            // 2. Update Borders
+            geoJsonLayer.eachLayer(l => {
+                if (l === layer) {
+                    l.setStyle(styleDefault); // Show border
+                    l.openTooltip(); 
+                } else {
+                    l.setStyle(styleHidden); // Hide border of others
+                    l.closeTooltip();
+                }
+            });
+
+            // 3. Zoom
+            map.fitBounds(layer.getBounds(), { padding: [50, 50] });
+
+            // 4. UI Update
+            updateSidebarUI(name);
+        }
+
+        function resetMap() {
+            // 1. Reset Mask to show ALL districts
+            updateMaskLayer(allFeatures);
+
+            // 2. Reset Borders
+            geoJsonLayer.eachLayer(layer => {
+                layer.setStyle(styleDefault);
+                layer.closeTooltip();
+            });
+
+            // 3. Reset View
+            map.fitBounds(geoJsonLayer.getBounds());
+
+            // 4. UI Reset
+            updateSidebarUI(null);
+        }
+
+        function updateSidebarUI(activeName) {
+            document.querySelectorAll('.district-item').forEach(el => {
+                if (el.getAttribute('data-name') === activeName) {
+                    el.className = "district-item cursor-pointer p-3 rounded-lg border border-cyan-200 bg-cyan-50 transition flex items-center justify-between";
+                    el.querySelector('span').className = "text-sm font-bold text-cyan-800";
+                    el.querySelector('i').className = "fas fa-check text-cyan-500 opacity-100";
+                    el.querySelector('i').classList.remove('fa-eye');
+                    el.querySelector('i').classList.add('fa-check');
+                } else {
+                    el.className = "district-item cursor-pointer p-3 rounded-lg border border-transparent hover:bg-slate-50 hover:border-slate-200 transition flex items-center justify-between group";
+                    el.querySelector('span').className = "text-sm font-medium text-slate-600 group-hover:text-slate-900";
+                    const icon = el.querySelector('i');
+                    icon.className = "fas fa-eye text-[10px] text-slate-300 group-hover:text-cyan-400 opacity-0 group-hover:opacity-100 transition";
+                }
+            });
+        }
+
+    </script>
+</body>
+</html>
